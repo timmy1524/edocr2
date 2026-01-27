@@ -3,7 +3,12 @@ import numpy as np
 from edocr2 import tools
 from pdf2image import convert_from_path
 
-file_path = 'tests/test_samples/Candle_holder.jpg'
+# old
+# file_path = 'tests/test_samples/Candle_holder.jpg'
+
+# new (Change file name to test)
+file_path = 'tests/test_samples/drawing_1_highres.pdf'
+
 language = 'eng'
 
 #Opening the file        
@@ -29,9 +34,15 @@ img_boxes, frame, gdt_boxes, tables, dim_boxes  = tools.layer_segm.segment_img(i
 #region ######## Set Session ##############################
 start_time = time.time()
 #os.environ['TF_XLA_FLAGS'] = '--tf_xla_enable_xla_devices'
+
+t1 = time.time()
 import tensorflow as tf
+print(f"  TF import: {time.time()-t1:.3f}s")
+
+t1 = time.time()
 from edocr2.keras_ocr.recognition import Recognizer
 from edocr2.keras_ocr.detection import Detector
+print(f"  Recognizer/Detector import: {time.time()-t1:.3f}s")
 
 # Configure GPU memory growth
 gpus = tf.config.list_physical_devices('GPU')
@@ -45,12 +56,25 @@ detector_model = None #'edocr2/models/detector_12_46.keras'
 
 recognizer_gdt = None
 if gdt_boxes:
+    t1 = time.time()
     recognizer_gdt = Recognizer(alphabet=tools.ocr_pipelines.read_alphabet(gdt_model))
+    print(f"  GDT Recognizer init: {time.time()-t1:.3f}s")
+    t1 = time.time()
     recognizer_gdt.model.load_weights(gdt_model)
+    print(f"  GDT load_weights: {time.time()-t1:.3f}s")
+
+t1 = time.time()
 alphabet_dim = tools.ocr_pipelines.read_alphabet(dim_model)
 recognizer_dim = Recognizer(alphabet=alphabet_dim)
+print(f"  DIM Recognizer init: {time.time()-t1:.3f}s")
+
+t1 = time.time()
 recognizer_dim.model.load_weights(dim_model)
+print(f"  DIM load_weights: {time.time()-t1:.3f}s")
+
+t1 = time.time()
 detector = Detector()
+print(f"  Detector init: {time.time()-t1:.3f}s")
 
 if detector_model:
     detector.model.load_weights(detector_model)
@@ -92,8 +116,15 @@ if qwen:
 
 #region ########### Output ################################
 
+# Create output directory if it doesn't exist
+os.makedirs(output_path, exist_ok=True)
+
 mask_img = tools.output_tools.mask_img(img, updated_gdt_boxes, updated_tables, dimensions, frame, other_info)
-table_results, gdt_results, dimensions, other_info = tools.output_tools.process_raw_output(output_path, table_results, gdt_results, dimensions, other_info, save=False)
+table_results, gdt_results, dimensions, other_info = tools.output_tools.process_raw_output(output_path, table_results, gdt_results, dimensions, other_info, save=True)
+
+# Save color-coded mask image
+cv2.imwrite(os.path.join(output_path, 'color_coded.png'), mask_img)
+print(f"✓ Saved color-coded image to {output_path}/color_coded.png")
 
 #endregion
 
@@ -140,7 +171,7 @@ if quality:
 #endregion
 
 ###################################################
-#cv2.imwrite('liu.png', mask_img)
+cv2.imwrite('color_coded_zzz.png', mask_img)
 #cv2.imshow('Mask Image', mask_img)
 #cv2.waitKey(0)
 #cv2.destroyAllWindows()
