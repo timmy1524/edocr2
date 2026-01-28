@@ -7,7 +7,7 @@ from pdf2image import convert_from_path
 # file_path = 'tests/test_samples/Candle_holder.jpg'
 
 # new (Change file name to test)
-file_path = 'tests/test_samples/drawing_1_highres.pdf'
+file_path = 'tests/aufspannung.pdf'
 
 language = 'eng'
 

@@ -51,11 +51,28 @@ def main():
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
         
-        # Load image
-        img = cv2.imread(image_path)
-        if img is None:
-            print(json.dumps({"error": f"Failed to load image: {image_path}"}))
-            sys.exit(1)
+        # Load image - support both PDF and image files
+        if image_path.lower().endswith('.pdf'):
+            # PDF: Use pdf2image (Poppler) for rendering - same as test_drawing.py
+            from pdf2image import convert_from_path
+            print(f"Loading PDF with pdf2image (Poppler)...", file=sys.stderr)
+            
+            # Get page index from args if provided (default to first page)
+            page_index = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+            
+            # Use 200 DPI (pdf2image default) to match test_drawing.py behavior
+            images = convert_from_path(image_path, first_page=page_index+1, last_page=page_index+1, dpi=200)
+            img = np.array(images[0])
+            # pdf2image returns RGB, cv2 expects BGR
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+            print(f"PDF rendered at 200 DPI: {img.shape[1]}x{img.shape[0]} pixels", file=sys.stderr)
+        else:
+            # Image file: Load directly
+            img = cv2.imread(image_path)
+            if img is None:
+                print(json.dumps({"error": f"Failed to load image: {image_path}"}))
+                sys.exit(1)
+            print(f"Loaded image: {img.shape[1]}x{img.shape[0]} pixels", file=sys.stderr)
         
         # Apply same preprocessing as test_drawing.py for better OCR results
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -70,6 +87,7 @@ def main():
         img_boxes, frame, gdt_boxes, tables, dim_boxes = tools.layer_segm.segment_img(
             img, autoframe=True, frame_thres=0.7, GDT_thres=0.02, binary_thres=127
         )
+        print(f"Segmentation results: frame={frame is not None}, gdt_boxes={len(gdt_boxes) if gdt_boxes else 0}, tables={len(tables) if tables else 0}, dim_boxes={len(dim_boxes) if dim_boxes else 0}", file=sys.stderr)
         
         # Step 2: Load models
         overall_start = time.time()
@@ -97,12 +115,15 @@ def main():
         try:
             recognizer_gdt = None
             if gdt_boxes:
+                print(f"Loading GDT model for {len(gdt_boxes)} detected GD&T regions...", file=sys.stderr)
                 t1 = time.time()
                 recognizer_gdt = Recognizer(alphabet=tools.ocr_pipelines.read_alphabet(gdt_model))
                 print(f"  GDT Recognizer init: {time.time()-t1:.3f}s", file=sys.stderr)
                 t1 = time.time()
                 recognizer_gdt.model.load_weights(gdt_model)
                 print(f"  GDT load_weights: {time.time()-t1:.3f}s", file=sys.stderr)
+            else:
+                print("No GD&T boxes detected during segmentation, skipping GDT model", file=sys.stderr)
             
             t1 = time.time()
             alphabet_dim = tools.ocr_pipelines.read_alphabet(dim_model)
@@ -157,7 +178,7 @@ def main():
                     print(f"[keras] {line}", file=sys.stderr)
         
         print(f"Loading session took {end_time - overall_start:.6f} seconds", file=sys.stderr)
-        print(f"Extraction complete: {len(dimensions)} dimensions, {len(other_info)} other_info", file=sys.stderr)
+        print(f"Extraction complete: {len(dimensions)} dimensions, {len(other_info)} other_info, {len(gdt_results)} GD&T, {len(table_results)} tables", file=sys.stderr)
         
         # Convert results to JSON-serializable format
         detections = []
@@ -165,7 +186,8 @@ def main():
         # Convert dimensions
         for i, dim in enumerate(dimensions):
             try:
-                if isinstance(dim, tuple) and len(dim) >= 2:
+                # Handle both tuple and list
+                if isinstance(dim, (tuple, list)) and len(dim) >= 2:
                     text, bbox_corners = dim[0], dim[1]
                     # Handle numpy array
                     if hasattr(bbox_corners, 'shape'):
@@ -208,7 +230,8 @@ def main():
         # Convert other_info
         for i, info in enumerate(other_info):
             try:
-                if isinstance(info, tuple) and len(info) >= 2:
+                # Handle both tuple and list
+                if isinstance(info, (tuple, list)) and len(info) >= 2:
                     text, bbox_corners = info[0], info[1]
                     # Handle numpy array
                     if hasattr(bbox_corners, 'shape'):
@@ -248,13 +271,17 @@ def main():
                 print(f"Warning: Failed to convert info {i}: {conv_e}, info={type(info)}", file=sys.stderr)
         
         # Convert tables
+        print(f"Converting {len(table_results)} table results...", file=sys.stderr)
         for i, table in enumerate(table_results):
             try:
+                print(f"  Table {i}: type={type(table)}, len={len(table) if hasattr(table, '__len__') else 'N/A'}", file=sys.stderr)
                 if isinstance(table, list) and len(table) > 0:
                     lefts = [word['left'] for word in table if 'left' in word]
                     tops = [word['top'] for word in table if 'top' in word]
                     rights = [word['left'] + word['width'] for word in table if 'left' in word and 'width' in word]
                     bottoms = [word['top'] + word['height'] for word in table if 'top' in word and 'height' in word]
+                    
+                    print(f"  Table {i}: lefts={len(lefts)}, tops={len(tops)}, rights={len(rights)}, bottoms={len(bottoms)}", file=sys.stderr)
                     
                     if lefts and tops and rights and bottoms:
                         x_min = min(lefts)
@@ -280,30 +307,64 @@ def main():
                             "tolerance": "",
                             "confidence": 0.9
                         })
+                        print(f"  Table {i}: ADDED to detections", file=sys.stderr)
+                    else:
+                        print(f"  Table {i}: SKIPPED - missing coordinate data", file=sys.stderr)
+                else:
+                    print(f"  Table {i}: SKIPPED - not a non-empty list", file=sys.stderr)
             except Exception as conv_e:
                 print(f"Warning: Failed to convert table {i}: {conv_e}", file=sys.stderr)
         
-        # Convert GD&T
+        # Convert GD&T - use updated_gdt_boxes for actual bounding boxes
+        print(f"Converting {len(gdt_results)} GD&T results (with {len(updated_gdt_boxes)} boxes)...", file=sys.stderr)
         for i, gdt in enumerate(gdt_results):
             try:
-                if isinstance(gdt, tuple) and len(gdt) >= 2:
-                    text, bbox_corners = gdt[0], gdt[1]
-                    # Handle numpy array
-                    if hasattr(bbox_corners, 'shape'):
-                        x_coords = bbox_corners[:, 0]
-                        y_coords = bbox_corners[:, 1]
-                    else:
-                        # Handle list of [x, y] pairs
-                        x_coords = [p[0] for p in bbox_corners]
-                        y_coords = [p[1] for p in bbox_corners]
+                print(f"  GD&T {i}: type={type(gdt)}, len={len(gdt) if hasattr(gdt, '__len__') else 'N/A'}", file=sys.stderr)
+                # Handle both tuple and list (edocr2 returns list)
+                if (isinstance(gdt, (tuple, list))) and len(gdt) >= 2:
+                    text, point_coords = gdt[0], gdt[1]
+                    print(f"  GD&T {i}: text='{text}', point_coords={point_coords}", file=sys.stderr)
                     
-                    x_min, x_max = int(min(x_coords)), int(max(x_coords))
-                    y_min, y_max = int(min(y_coords)), int(max(y_coords))
+                    # Try to get bounding box from updated_gdt_boxes (contains actual dimensions)
+                    x_min, y_min, x_max, y_max = None, None, None, None
+                    
+                    if i < len(updated_gdt_boxes):
+                        # updated_gdt_boxes[i] is a dict where values are lists of box objects with .x, .y, .w, .h
+                        gdt_block = updated_gdt_boxes[i]
+                        all_boxes = []
+                        for key, box_list in gdt_block.items():
+                            all_boxes.extend(box_list)
+                        
+                        if all_boxes:
+                            # Compute bounding box that encloses all sub-boxes
+                            x_min = min(b.x for b in all_boxes)
+                            y_min = min(b.y for b in all_boxes)
+                            x_max = max(b.x + b.w for b in all_boxes)
+                            y_max = max(b.y + b.h for b in all_boxes)
+                            print(f"  GD&T {i}: bbox from updated_gdt_boxes: ({x_min}, {y_min}) to ({x_max}, {y_max})", file=sys.stderr)
+                    
+                    # Fallback: create box from point if updated_gdt_boxes didn't work
+                    if x_min is None:
+                        if isinstance(point_coords, (tuple, list)) and len(point_coords) == 2:
+                            if all(isinstance(v, (int, float, np.integer, np.floating)) for v in point_coords):
+                                # (x, y) is top-left of first sub-box, not center
+                                px, py = int(point_coords[0]), int(point_coords[1])
+                                # Create a box starting at this point (typical GD&T symbol size)
+                                box_w, box_h = 150, 40
+                                x_min, y_min = px, py
+                                x_max, y_max = px + box_w, py + box_h
+                                print(f"  GD&T {i}: Created fallback bbox from point ({px}, {py})", file=sys.stderr)
+                    
+                    if x_min is None:
+                        print(f"  GD&T {i}: SKIPPED - couldn't determine bbox", file=sys.stderr)
+                        continue
                     
                     bbox_width = x_max - x_min
                     bbox_height = y_max - y_min
                     center_x = x_min + bbox_width / 2
                     center_y = y_min + bbox_height / 2
+                    
+                    print(f"  GD&T {i}: final bbox=({x_min}, {y_min}, {x_max}, {y_max})", file=sys.stderr)
                     
                     detections.append({
                         "type": "gdt",
@@ -316,8 +377,13 @@ def main():
                         "tolerance": "",
                         "confidence": 0.9
                     })
+                    print(f"  GD&T {i}: ADDED to detections", file=sys.stderr)
+                else:
+                    print(f"  GD&T {i}: SKIPPED - not tuple/list or len < 2", file=sys.stderr)
             except Exception as conv_e:
+                import traceback
                 print(f"Warning: Failed to convert gdt {i}: {conv_e}", file=sys.stderr)
+                print(traceback.format_exc(), file=sys.stderr)
         
         # Output result as JSON (stdout)
         result = {
