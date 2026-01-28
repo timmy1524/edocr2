@@ -213,13 +213,29 @@ def main():
                         x_min += frame.x
                         y_min += frame.y
                     
+                    # Parse dimension designator (symbol like R, ⌀, M, etc.)
+                    dim_text = str(text) if text else ""
+                    designator = ""
+                    if dim_text:
+                        # Check for common dimension symbols at the start
+                        # ⌀ = diameter, R = radius, M = metric thread, ∅ = diameter
+                        first_char = dim_text[0]
+                        if first_char in ['R', 'M', '⌀', '∅', 'Ø']:
+                            designator = first_char
+                        elif ' ' in dim_text:
+                            # Fall back to first word if there's a space
+                            designator = dim_text.split()[0]
+                        else:
+                            # No clear designator, use full text
+                            designator = dim_text
+                    
                     detections.append({
                         "type": "dimension",
                         "x": float(center_x),
                         "y": float(center_y),
                         "bbox": {"x": float(x_min), "y": float(y_min), "width": float(bbox_width), "height": float(bbox_height)},
-                        "requirement": str(text) if text else "",
-                        "designator": str(text).split()[0] if text else "",
+                        "requirement": dim_text,
+                        "designator": designator,
                         "ref_location": "",
                         "tolerance": "",
                         "confidence": 0.9
@@ -366,13 +382,19 @@ def main():
                     
                     print(f"  GD&T {i}: final bbox=({x_min}, {y_min}, {x_max}, {y_max})", file=sys.stderr)
                     
+                    # Parse GD&T: format is typically "⌰|06|A" where first char is the symbol
+                    gdt_text = str(text) if text else ""
+                    # Extract the GD&T symbol (first character before |)
+                    gdt_parts = gdt_text.split("|")
+                    gdt_symbol = gdt_parts[0] if gdt_parts else gdt_text
+                    
                     detections.append({
                         "type": "gdt",
                         "x": float(center_x),
                         "y": float(center_y),
                         "bbox": {"x": float(x_min), "y": float(y_min), "width": float(bbox_width), "height": float(bbox_height)},
-                        "requirement": str(text) if text else "",
-                        "designator": str(text) if text else "",
+                        "requirement": gdt_text,
+                        "designator": gdt_symbol,  # Just the GD&T symbol (e.g., "⌰" for position)
                         "ref_location": "",
                         "tolerance": "",
                         "confidence": 0.9
